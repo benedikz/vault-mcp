@@ -16,6 +16,9 @@ Environment=VAULT_CACHE=/var/lib/vault-mcp/models
 Environment=VAULT_TRANSPORT=http
 Environment=VAULT_HOST=127.0.0.1
 Environment=VAULT_PORT=8765
+# Set to your public hostname for strict Host validation (recommended).
+# Left empty, DNS-rebinding/Host checks are disabled (the bearer token still gates).
+Environment=VAULT_PUBLIC_HOST=
 Environment=VAULT_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 EnvironmentFile=/etc/vault-mcp/secrets.env
 ExecStart=/opt/vault-mcp/.venv/bin/python -m vault.server

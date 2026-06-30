@@ -29,10 +29,37 @@ def _embed_note(embedder, title: str, body: str):
     return chunks, vectors
 
 
+def _security_kwargs(cfg) -> dict:
+    """Host/DNS-rebinding validation for the streamable HTTP transport.
+
+    Behind a Cloudflare tunnel the incoming Host is the public domain, which the
+    MCP SDK rejects by default (HTTP 421). Allow the configured public host; if
+    none is set, disable the check entirely — the server binds to 127.0.0.1 and
+    the bearer token is the real gate, so the localhost-oriented DNS-rebinding
+    protection adds nothing here and only breaks tunneled access.
+    """
+    try:
+        from mcp.server.transport_security import TransportSecuritySettings
+    except ImportError:
+        return {}
+    if cfg.public_host:
+        sec = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=[
+                cfg.public_host, f"{cfg.public_host}:*",
+                "127.0.0.1", f"127.0.0.1:{cfg.port}", "localhost", f"localhost:{cfg.port}",
+            ],
+            allowed_origins=[f"https://{cfg.public_host}"],
+        )
+    else:
+        sec = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    return {"transport_security": sec}
+
+
 def build_mcp(cfg, conn, embedder):
     from mcp.server.fastmcp import FastMCP
 
-    mcp = FastMCP("brain-vault")
+    mcp = FastMCP("brain-vault", **_security_kwargs(cfg))
 
     @mcp.tool()
     def create_note(title: str, body: str, tags: list[str] | None = None) -> dict:

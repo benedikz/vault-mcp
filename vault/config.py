@@ -66,6 +66,7 @@ class Config:
     rerank: bool
     query_prefix: str
     passage_prefix: str
+    public_host: str
 
 
 def _require(name: str) -> str:
@@ -145,4 +146,5 @@ def load() -> Config:
         rerank=os.environ.get("VAULT_RERANK", "").strip().lower() in _TRUE,
         query_prefix=_read_prefix("VAULT_QUERY_PREFIX", qp_default),
         passage_prefix=_read_prefix("VAULT_PASSAGE_PREFIX", pp_default),
+        public_host=os.environ.get("VAULT_PUBLIC_HOST", "").strip(),
     )

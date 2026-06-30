@@ -97,6 +97,11 @@ sudo cloudflared service install
 
 Add a Cloudflare Access application + Service Token for `vault.example.com`.
 
+Behind a tunnel the request arrives with `Host: <your domain>`, which the MCP SDK's
+DNS-rebinding protection rejects with **HTTP 421** unless allowed. Set
+`VAULT_PUBLIC_HOST=vault.example.com` so the server allow-lists it (recommended). Leave
+it empty to disable the Host check entirely — the bearer token still gates every request.
+
 ## Connect Claude
 
 ```bash
