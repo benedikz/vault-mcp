@@ -40,8 +40,9 @@ sudo git clone https://github.com/benedikz/vault-mcp.git /opt/vault-mcp
 sudo bash /opt/vault-mcp/deploy/setup.sh
 ```
 
-If `sqlcipher3-binary` has no aarch64 wheel for your Python, it builds against the
-`libsqlcipher-dev`/`build-essential` packages the script installs. Layout:
+On aarch64 there is no `sqlcipher3-binary` wheel, so `sqlcipher3` is built from source
+against the `libsqlcipher-dev`/`build-essential` packages the script installs (selected
+automatically by a platform marker in `pyproject.toml`). Layout:
 
 | Path | Contents |
 |------|----------|
