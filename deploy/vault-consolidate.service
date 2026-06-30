@@ -1,0 +1,24 @@
+[Unit]
+Description=Brain Vault MCP consolidation (the nightly "sleep" pass)
+After=vault-mcp.service
+
+[Service]
+Type=oneshot
+User=vault
+Group=vault
+Environment=HOME=/var/lib/vault-mcp
+Environment=VAULT_DB_PATH=/var/lib/vault-mcp/brain.db
+# stdio transport so config.load() doesn't require a bearer token; this pass
+# never opens a socket. VAULT_KEY comes from the EnvironmentFile.
+Environment=VAULT_TRANSPORT=stdio
+EnvironmentFile=/etc/vault-mcp/secrets.env
+WorkingDirectory=/opt/vault-mcp
+ExecStart=/opt/vault-mcp/.venv/bin/python /opt/vault-mcp/bin/consolidate.py
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/vault-mcp
+ProtectKernelTunables=true
+ProtectControlGroups=true

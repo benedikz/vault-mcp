@@ -124,15 +124,23 @@ claude mcp add --transport http brain https://vault.example.com/mcp \
 
 ## Consolidation (the "sleep" pass)
 
-Run nightly via cron on the Pi:
+The server never consolidates on its own — schedule it. On the Pi, install the
+provided systemd timer (runs nightly at 03:00 as the `vault` user, reusing
+`secrets.env`):
 
-```cron
-0 3 * * *  cd /home/pi/vault-mcp && .venv/bin/python -c "from vault import config,db,consolidate; \
-c=config.load(); cn=db.connect(c); print(consolidate.consolidate(cn))"
+```bash
+sudo cp deploy/vault-consolidate.service deploy/vault-consolidate.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now vault-consolidate.timer
+sudo systemctl start vault-consolidate.service          # run once now to test
+journalctl -u vault-consolidate.service -n 20 --no-pager
+systemctl list-timers vault-consolidate.timer --no-pager
 ```
 
-It also flags near-duplicate notes (cosine ≥ `DEDUP_FLOOR`) into `review_duplicates`
-for you to merge or keep — the vault never auto-merges.
+It rebuilds semantic/link edges, decays and prunes stale Hebbian edges, recomputes
+salience, and flags near-duplicate notes (cosine ≥ `DEDUP_FLOOR`) into
+`review_duplicates` for you to merge or keep — the vault never auto-merges. The pass
+runs against the DB only (no model load) and is safe to run while the server is idle.
 
 ## Import existing notes
 
