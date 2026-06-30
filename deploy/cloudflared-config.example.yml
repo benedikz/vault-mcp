@@ -1,0 +1,17 @@
+# /home/pi/.cloudflared/config.yml
+# Create the tunnel first:  cloudflared tunnel create vault
+# Route DNS:                cloudflared tunnel route dns vault vault.example.com
+
+tunnel: REPLACE_WITH_TUNNEL_UUID
+credentials-file: /home/pi/.cloudflared/REPLACE_WITH_TUNNEL_UUID.json
+
+ingress:
+  - hostname: vault.example.com
+    service: http://127.0.0.1:8765
+  - service: http_status:404
+
+# Then, in the Cloudflare Zero Trust dashboard:
+#   1. Add an Access application for vault.example.com.
+#   2. Create a Service Token for machine access (Claude).
+#   3. Add a policy allowing that service token (and/or your own identity).
+# The server ALSO checks VAULT_TOKEN as a second, independent gate.
