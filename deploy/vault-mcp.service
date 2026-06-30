@@ -5,27 +5,32 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/vault-mcp
-Environment=VAULT_DB_PATH=/home/pi/.vault/brain.db
-Environment=VAULT_CACHE=/home/pi/.vault/models
+User=vault
+Group=vault
+WorkingDirectory=/opt/vault-mcp
+# HOME / HF_HOME keep any stray model-cache writes inside the one writable path.
+Environment=HOME=/var/lib/vault-mcp
+Environment=HF_HOME=/var/lib/vault-mcp/hf
+Environment=VAULT_DB_PATH=/var/lib/vault-mcp/brain.db
+Environment=VAULT_CACHE=/var/lib/vault-mcp/models
 Environment=VAULT_TRANSPORT=http
 Environment=VAULT_HOST=127.0.0.1
 Environment=VAULT_PORT=8765
 Environment=VAULT_MODEL=intfloat/multilingual-e5-small
-EnvironmentFile=/home/pi/.vault/secrets.env
-ExecStart=/home/pi/vault-mcp/.venv/bin/python -m vault.server
+EnvironmentFile=/etc/vault-mcp/secrets.env
+ExecStart=/opt/vault-mcp/.venv/bin/python -m vault.server
 Restart=on-failure
 RestartSec=3
 
+# Hardening
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=/home/pi/.vault
+ProtectHome=true
+ReadWritePaths=/var/lib/vault-mcp
 ProtectKernelTunables=true
 ProtectControlGroups=true
-RestrictAddressFamilies=AF_INET AF_INET6
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]
 WantedBy=multi-user.target

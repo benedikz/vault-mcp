@@ -29,18 +29,25 @@ Designed to run on a Raspberry Pi behind a Cloudflare Tunnel.
 - Defensive by default: all tool inputs validated and bounded, parameterized SQL only,
   soft-delete + version history make every write reversible, every operation audited.
 
-## Requirements (Raspberry Pi OS, 64-bit)
+## Install (Ubuntu Server 24.04 LTS, aarch64 / Raspberry Pi)
+
+Clone into `/opt` and run the provisioning script — it installs OS deps, creates the
+`vault` service user, builds the venv, installs the package, and registers the systemd
+unit:
 
 ```bash
-sudo apt update
-sudo apt install -y python3-venv libsqlcipher-dev   # libsqlcipher headers for sqlcipher3
-cd /home/pi/vault-mcp
-python3 -m venv .venv
-.venv/bin/pip install -e .
+sudo git clone https://github.com/benedikz/vault-mcp.git /opt/vault-mcp
+sudo bash /opt/vault-mcp/deploy/setup.sh
 ```
 
-If `sqlcipher3-binary` has no aarch64 wheel for your Python, it builds against
-`libsqlcipher-dev` installed above.
+If `sqlcipher3-binary` has no aarch64 wheel for your Python, it builds against the
+`libsqlcipher-dev`/`build-essential` packages the script installs. Layout:
+
+| Path | Contents |
+|------|----------|
+| `/opt/vault-mcp` | code + `.venv` (read-only to the service) |
+| `/var/lib/vault-mcp` | `brain.db`, embedding model cache (the only writable path) |
+| `/etc/vault-mcp/secrets.env` | `VAULT_KEY`, `VAULT_TOKEN` (root:vault, chmod 640) |
 
 Confirm the embedding model name your `fastembed` version supports and set `VAULT_MODEL`
 accordingly (the vector dimension is auto-detected at init):
@@ -52,29 +59,37 @@ import json; print(json.dumps([m['model'] for m in TextEmbedding.list_supported_
 
 ## Initialize
 
+Run `init.py` **as the `vault` user** so the database and model cache are owned
+correctly. It downloads the embedding model on first run, then prints the encryption
+key **once**:
+
 ```bash
-export VAULT_DB_PATH=/home/pi/.vault/brain.db
-export VAULT_MODEL=intfloat/multilingual-e5-small      # pick a multilingual model
-.venv/bin/python bin/init.py
+sudo -u vault HOME=/var/lib/vault-mcp HF_HOME=/var/lib/vault-mcp/hf \
+  VAULT_DB_PATH=/var/lib/vault-mcp/brain.db VAULT_CACHE=/var/lib/vault-mcp/models \
+  VAULT_MODEL=intfloat/multilingual-e5-small \
+  /opt/vault-mcp/.venv/bin/python /opt/vault-mcp/bin/init.py
 ```
 
-`init.py` prints the encryption key **once**. Put it in `secrets.env` and split it for
-recovery (see `RECOVERY.md`). Never store a plaintext copy next to the database.
+Put the printed key in `secrets.env` and split it for recovery (see `RECOVERY.md`).
+Never store a plaintext copy next to the database.
 
 ```bash
-# /home/pi/.vault/secrets.env   (chmod 600)
+# /etc/vault-mcp/secrets.env   (chown root:vault, chmod 640)
 VAULT_KEY=<64-hex key from init>
-VAULT_TOKEN=<random 48+ char bearer token>
+VAULT_TOKEN=<run: openssl rand -hex 24>
 ```
 
 ## Run as a service + tunnel
 
+The systemd unit is installed by `setup.sh`; start it once secrets are in place:
+
 ```bash
-sudo cp deploy/vault-mcp.service /etc/systemd/system/
 sudo systemctl enable --now vault-mcp
+sudo systemctl status vault-mcp        # confirm it's running
 # Cloudflare:
+cloudflared tunnel login
 cloudflared tunnel create vault
-cp deploy/cloudflared-config.example.yml /home/pi/.cloudflared/config.yml   # then edit
+sudo cp deploy/cloudflared-config.example.yml /etc/cloudflared/config.yml   # then edit
 cloudflared tunnel route dns vault vault.example.com
 sudo cloudflared service install
 ```
