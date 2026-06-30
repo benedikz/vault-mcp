@@ -10,7 +10,7 @@ from vault.errors import AlreadyInitializedError  # noqa: E402
 
 def main() -> None:
     db_path = os.environ.get("VAULT_DB_PATH", "").strip() or os.path.expanduser("~/.vault/brain.db")
-    model = os.environ.get("VAULT_MODEL", "intfloat/multilingual-e5-small").strip()
+    model = os.environ.get("VAULT_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2").strip()
     cache_dir = os.environ.get("VAULT_CACHE", "").strip() or None
 
     if os.path.exists(db_path):

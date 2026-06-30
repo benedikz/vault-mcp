@@ -130,7 +130,7 @@ def load() -> Config:
             raise ConfigError("VAULT_TOKEN must be set and at least 32 characters for http transport")
 
     db_path = os.environ.get("VAULT_DB_PATH", "").strip() or os.path.expanduser("~/.vault/brain.db")
-    model = os.environ.get("VAULT_MODEL", "intfloat/multilingual-e5-small").strip()
+    model = os.environ.get("VAULT_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2").strip()
     qp_default, pp_default = default_prefixes(model)
 
     return Config(

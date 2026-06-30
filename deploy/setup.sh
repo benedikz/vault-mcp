@@ -47,7 +47,7 @@ cat <<EOF
 Done. Next (see README "Initialize"):
   1. sudo -u ${SVC_USER} HOME=${DATA_DIR} HF_HOME=${DATA_DIR}/hf \\
        VAULT_DB_PATH=${DATA_DIR}/brain.db VAULT_CACHE=${DATA_DIR}/models \\
-       VAULT_MODEL=intfloat/multilingual-e5-small \\
+       VAULT_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 \\
        ${APP_DIR}/.venv/bin/python ${APP_DIR}/bin/init.py
      -> copy the printed key into ${ETC_DIR}/secrets.env
   2. Write ${ETC_DIR}/secrets.env (chmod 640, root:${SVC_USER}):

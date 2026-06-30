@@ -67,7 +67,7 @@ key **once**:
 ```bash
 sudo -u vault HOME=/var/lib/vault-mcp HF_HOME=/var/lib/vault-mcp/hf \
   VAULT_DB_PATH=/var/lib/vault-mcp/brain.db VAULT_CACHE=/var/lib/vault-mcp/models \
-  VAULT_MODEL=intfloat/multilingual-e5-small \
+  VAULT_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 \
   /opt/vault-mcp/.venv/bin/python /opt/vault-mcp/bin/init.py
 ```
 

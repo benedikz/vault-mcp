@@ -16,7 +16,7 @@ Environment=VAULT_CACHE=/var/lib/vault-mcp/models
 Environment=VAULT_TRANSPORT=http
 Environment=VAULT_HOST=127.0.0.1
 Environment=VAULT_PORT=8765
-Environment=VAULT_MODEL=intfloat/multilingual-e5-small
+Environment=VAULT_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 EnvironmentFile=/etc/vault-mcp/secrets.env
 ExecStart=/opt/vault-mcp/.venv/bin/python -m vault.server
 Restart=on-failure
