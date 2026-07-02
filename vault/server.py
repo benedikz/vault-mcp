@@ -10,9 +10,15 @@ def _assemble(candidates: list[retrieve.Candidate], max_tokens: int):
     parts: list[str] = []
     length = 0
     for cand in candidates:
-        block = f"### {cand.title}  (id:{cand.id})\n{cand.body}\n\n"
+        header = f"### {cand.title}  (id:{cand.id})\n"
+        block = f"{header}{cand.body}\n\n"
         if used and length + len(block) > budget:
             break
+        if not used and len(block) > budget:
+            # Always return the top hit, but never blow the caller's budget:
+            # truncate the body; the id citation lets the agent read the rest.
+            keep = max(0, budget - len(header) - 3)
+            block = f"{header}{cand.body[:keep]}…\n\n"
         parts.append(block)
         length += len(block)
         used.append(cand)
@@ -178,15 +184,23 @@ def build_mcp(cfg, conn, embedder):
     return mcp
 
 
+def _token_matches(header: str, expected: str) -> bool:
+    """Constant-time bearer check that never raises: compare_digest on str is
+    ASCII-only and would turn a non-ASCII header into an HTTP 500, so compare
+    encoded bytes instead."""
+    presented = header[7:].strip() if header[:7].lower() == "bearer " else ""
+    if not presented:
+        return False
+    return hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
+
+
 def _bearer_middleware(expected: str):
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
 
     class BearerAuth(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
-            header = request.headers.get("authorization", "")
-            presented = header[7:].strip() if header[:7].lower() == "bearer " else ""
-            if not presented or not hmac.compare_digest(presented, expected):
+            if not _token_matches(request.headers.get("authorization", ""), expected):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
             return await call_next(request)
 

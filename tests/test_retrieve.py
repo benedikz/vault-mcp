@@ -41,6 +41,30 @@ def test_recall_spreads_over_synapses(conn, embedder, make_note):
     assert linked in found
 
 
+def test_activation_does_not_route_through_trashed_note(conn, make_note):
+    from vault import store
+
+    a = make_note("Coffee", "coffee brewing methods")
+    b = make_note("Middle", "middle hop qwerty")
+    c = make_note("Target", "target plugh xyzzy")
+    store.connect_notes(conn, a, b, "link", 1.0)
+    store.connect_notes(conn, b, c, "link", 1.0)
+    store.trash_note(conn, b)
+    activation = retrieve.spread_activation(conn, {a: 1.0}, depth=2)
+    assert b not in activation
+    assert c not in activation
+
+
+def test_neighbors_includes_incoming_edges(conn, make_note):
+    from vault import store
+
+    src = make_note("Src", "source note body")
+    dst = make_note("Dst", "destination note body")
+    store.connect_notes(conn, src, dst, "link", 1.0)
+    assert any(r["id"] == dst for r in retrieve.neighbors(conn, src))
+    assert any(r["id"] == src for r in retrieve.neighbors(conn, dst))
+
+
 def test_recency_prefers_newer_among_equal(conn, embedder, make_note):
     older = make_note("Note one", "identical body content alpha")
     newer = make_note("Note two", "identical body content alpha")

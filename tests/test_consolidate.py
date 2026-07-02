@@ -1,6 +1,22 @@
 from vault import consolidate, store
 
 
+def test_consolidation_sweeps_orphaned_synapses(conn, make_note):
+    a = make_note("A", "alpha")
+    ghost = "00000000-0000-0000-0000-000000000000"
+    with conn:
+        conn.execute(
+            "INSERT INTO synapses(src, dst, kind, weight) VALUES(?, ?, 'hebbian', 1.0)",
+            (a, ghost),
+        )
+        conn.execute("INSERT INTO node_stats(note_id) VALUES(?)", (ghost,))
+    stats = consolidate.consolidate(conn)
+    assert stats["orphaned"] >= 1
+    left = conn.execute("SELECT COUNT(*) AS c FROM synapses WHERE dst = ?", (ghost,)).fetchone()["c"]
+    assert left == 0
+    assert conn.execute("SELECT 1 FROM node_stats WHERE note_id = ?", (ghost,)).fetchone() is None
+
+
 def test_semantic_edges_built_between_similar_notes(conn, make_note):
     a = make_note("Cats one", "cats are small domestic feline animals")
     b = make_note("Cats two", "cats small domestic feline animals pets")

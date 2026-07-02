@@ -162,11 +162,18 @@ def recall(conn, query_vector, query: str, depth: int, k: int) -> list[Candidate
 
 
 def neighbors(conn, note_id: str, limit: int = 20) -> list[dict]:
+    # Edges are directional (semantic top-k is not symmetric, links point one
+    # way), so look both ways and keep the strongest edge per (note, kind).
     rows = conn.execute(
-        "SELECT s.dst AS id, s.kind AS kind, s.weight AS weight, n.title AS title "
-        "FROM synapses s JOIN notes n ON n.id = s.dst "
-        "WHERE s.src = ? AND n.deleted_at IS NULL "
-        "ORDER BY s.weight DESC LIMIT ?",
-        (note_id, limit),
+        "SELECT id, title, kind, MAX(weight) AS weight FROM ("
+        "  SELECT s.dst AS id, n.title AS title, s.kind AS kind, s.weight AS weight"
+        "  FROM synapses s JOIN notes n ON n.id = s.dst"
+        "  WHERE s.src = ? AND n.deleted_at IS NULL"
+        "  UNION ALL"
+        "  SELECT s.src AS id, n.title AS title, s.kind AS kind, s.weight AS weight"
+        "  FROM synapses s JOIN notes n ON n.id = s.src"
+        "  WHERE s.dst = ? AND n.deleted_at IS NULL"
+        ") GROUP BY id, kind ORDER BY weight DESC LIMIT ?",
+        (note_id, note_id, limit),
     ).fetchall()
     return [{"id": r["id"], "title": r["title"], "kind": r["kind"], "weight": r["weight"]} for r in rows]

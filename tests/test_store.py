@@ -1,7 +1,7 @@
 import pytest
 
 from vault import store
-from vault.errors import NotFoundError
+from vault.errors import NotFoundError, ValidationError
 
 
 def _chunk_count(conn, note_id):
@@ -78,3 +78,32 @@ def test_connect_rejects_unknown_note(conn, make_note):
     a = make_note("A", "alpha")
     with pytest.raises(NotFoundError):
         store.connect_notes(conn, a, "00000000-0000-0000-0000-000000000000", "link", 1.0)
+
+
+def test_trash_removes_synapses_and_node_stats(conn, make_note):
+    a = make_note("A", "alpha")
+    b = make_note("B", "beta")
+    store.connect_notes(conn, a, b, "link", 1.0)
+    store.reinforce(conn, [a, b])
+    store.trash_note(conn, b)
+    touching = conn.execute(
+        "SELECT COUNT(*) AS c FROM synapses WHERE src = ? OR dst = ?", (b, b)
+    ).fetchone()["c"]
+    assert touching == 0
+    assert conn.execute("SELECT 1 FROM node_stats WHERE note_id = ?", (b,)).fetchone() is None
+
+
+def test_connect_rejects_self_loop(conn, make_note):
+    a = make_note("A", "alpha")
+    with pytest.raises(ValidationError):
+        store.connect_notes(conn, a, a, "link", 1.0)
+
+
+def test_reinforce_duplicate_ids_create_no_self_loop(conn, make_note):
+    a = make_note("A", "alpha")
+    b = make_note("B", "beta")
+    store.reinforce(conn, [a, a, b])
+    self_loops = conn.execute("SELECT COUNT(*) AS c FROM synapses WHERE src = dst").fetchone()["c"]
+    assert self_loops == 0
+    edges = conn.execute("SELECT COUNT(*) AS c FROM synapses WHERE kind = 'hebbian'").fetchone()["c"]
+    assert edges == 2

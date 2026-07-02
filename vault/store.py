@@ -4,7 +4,7 @@ import uuid
 import sqlite_vec
 
 from vault import config
-from vault.errors import NotFoundError
+from vault.errors import NotFoundError, ValidationError
 
 
 def _audit(conn, action: str, note_id: str | None = None, detail: str | None = None) -> None:
@@ -131,10 +131,16 @@ def trash_note(conn, note_id: str) -> None:
         conn.execute("DELETE FROM notes_fts WHERE rowid = ?", (seq,))
         _drop_chunks(conn, note_id)
         conn.execute("DELETE FROM duplicate_candidates WHERE a = ? OR b = ?", (note_id, note_id))
+        # A trashed note must leave the graph entirely, or its edges keep
+        # routing spreading activation and occupying recall candidate slots.
+        conn.execute("DELETE FROM synapses WHERE src = ? OR dst = ?", (note_id, note_id))
+        conn.execute("DELETE FROM node_stats WHERE note_id = ?", (note_id,))
         _audit(conn, "trash", note_id)
 
 
 def connect_notes(conn, src: str, dst: str, kind: str, weight: float) -> None:
+    if src == dst:
+        raise ValidationError("cannot connect a note to itself")
     for ident in (src, dst):
         if conn.execute(
             "SELECT 1 FROM notes WHERE id = ? AND deleted_at IS NULL", (ident,)
@@ -152,6 +158,9 @@ def connect_notes(conn, src: str, dst: str, kind: str, weight: float) -> None:
 
 
 def reinforce(conn, ids: list[str], delta: float = config.HEBB_DELTA, cap: float = config.HEBB_CAP) -> None:
+    # A repeated id would pair with itself and create a self-loop synapse,
+    # which self-amplifies under spreading activation.
+    ids = list(dict.fromkeys(ids))
     pairs: list[tuple[str, str]] = []
     for i in range(len(ids)):
         for j in range(i + 1, len(ids)):

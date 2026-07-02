@@ -97,6 +97,18 @@ def _rebuild_links(conn, stats: dict) -> None:
 
 def _decay_and_prune(conn, stats: dict) -> None:
     with conn:
+        # trash_note removes a note's edges, but vaults trashed under older
+        # code still carry them — sweep any edge touching a non-live note.
+        cur = conn.execute(
+            "DELETE FROM synapses "
+            "WHERE src NOT IN (SELECT id FROM notes WHERE deleted_at IS NULL) "
+            "OR dst NOT IN (SELECT id FROM notes WHERE deleted_at IS NULL)"
+        )
+        stats["orphaned"] = cur.rowcount
+        conn.execute(
+            "DELETE FROM node_stats WHERE note_id NOT IN "
+            "(SELECT id FROM notes WHERE deleted_at IS NULL)"
+        )
         conn.execute(
             "UPDATE synapses SET weight = weight * ? "
             "WHERE kind = 'hebbian' AND (last_fired_at IS NULL OR last_fired_at < datetime('now', ?))",
@@ -126,7 +138,7 @@ def _recompute_salience(conn, stats: dict) -> None:
 
 
 def consolidate(conn) -> dict:
-    stats = {"semantic": 0, "link": 0, "pruned": 0, "salient_nodes": 0, "duplicates": 0}
+    stats = {"semantic": 0, "link": 0, "pruned": 0, "orphaned": 0, "salient_nodes": 0, "duplicates": 0}
     with db.lock:
         _rebuild_semantic(conn, stats)
         _rebuild_links(conn, stats)
