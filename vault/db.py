@@ -11,19 +11,26 @@ lock = threading.RLock()
 
 def schema_sql(dim: int) -> str:
     return f"""
+    -- archived_at marks the demoted ("forgotten") tier: the note keeps its
+    -- content, versions and index entries, but is score-penalized in retrieval
+    -- and excluded from the semantic-edge rebuild. Any recall or read clears
+    -- it. Nothing is ever erased by archiving.
     CREATE TABLE IF NOT EXISTS notes (
-      seq        INTEGER PRIMARY KEY,
-      id         TEXT NOT NULL UNIQUE,
-      title      TEXT NOT NULL,
-      body       TEXT NOT NULL,
-      tags       TEXT NOT NULL DEFAULT '[]',
-      embeddable INTEGER NOT NULL DEFAULT 1,
-      version    INTEGER NOT NULL DEFAULT 1,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-      deleted_at TEXT
+      seq         INTEGER PRIMARY KEY,
+      id          TEXT NOT NULL UNIQUE,
+      title       TEXT NOT NULL,
+      body        TEXT NOT NULL,
+      tags        TEXT NOT NULL DEFAULT '[]',
+      embeddable  INTEGER NOT NULL DEFAULT 1,
+      version     INTEGER NOT NULL DEFAULT 1,
+      importance  REAL NOT NULL DEFAULT 0,
+      created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+      archived_at TEXT,
+      deleted_at  TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_notes_deleted ON notes(deleted_at);
+    CREATE INDEX IF NOT EXISTS idx_notes_archived ON notes(archived_at);
 
     CREATE TABLE IF NOT EXISTS note_versions (
       id         INTEGER PRIMARY KEY,
@@ -55,7 +62,7 @@ def schema_sql(dim: int) -> str:
     CREATE TABLE IF NOT EXISTS synapses (
       src           TEXT NOT NULL,
       dst           TEXT NOT NULL,
-      kind          TEXT NOT NULL CHECK (kind IN ('link','semantic','hebbian')),
+      kind          TEXT NOT NULL CHECK (kind IN ('link','semantic','hebbian','temporal')),
       weight        REAL NOT NULL DEFAULT 0,
       last_fired_at TEXT,
       PRIMARY KEY (src, dst, kind)
@@ -78,6 +85,15 @@ def schema_sql(dim: int) -> str:
       score      REAL NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (a, b)
+    );
+
+    -- Dense groups of mutually similar notes surfaced by consolidation for
+    -- the agent to synthesize into a gist note. Flag-only, like duplicates.
+    CREATE TABLE IF NOT EXISTS cluster_candidates (
+      key        TEXT PRIMARY KEY,
+      members    TEXT NOT NULL,
+      score      REAL NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
     CREATE TABLE IF NOT EXISTS audit_log (
@@ -157,7 +173,49 @@ def _migrate_1_to_2(conn) -> None:
         )
 
 
-_MIGRATIONS = {2: _migrate_1_to_2}
+def _migrate_2_to_3(conn) -> None:
+    """v3 adds notes.importance / notes.archived_at, the 'temporal' synapse
+    kind (a CHECK change, so the table is rebuilt in place), and the
+    cluster_candidates table. Column/DDL checks make it safe to re-run on a
+    partially migrated vault. No re-embedding is needed."""
+    note_cols = {row["name"] for row in conn.execute("PRAGMA table_info(notes)").fetchall()}
+    with conn:
+        if "importance" not in note_cols:
+            conn.execute("ALTER TABLE notes ADD COLUMN importance REAL NOT NULL DEFAULT 0")
+        if "archived_at" not in note_cols:
+            conn.execute("ALTER TABLE notes ADD COLUMN archived_at TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_archived ON notes(archived_at)")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cluster_candidates (
+              key TEXT PRIMARY KEY, members TEXT NOT NULL, score REAL NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')))
+            """
+        )
+    ddl = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'synapses'"
+    ).fetchone()
+    if ddl and "'temporal'" not in ddl["sql"]:
+        conn.executescript(
+            """
+            CREATE TABLE synapses_v3 (
+              src           TEXT NOT NULL,
+              dst           TEXT NOT NULL,
+              kind          TEXT NOT NULL CHECK (kind IN ('link','semantic','hebbian','temporal')),
+              weight        REAL NOT NULL DEFAULT 0,
+              last_fired_at TEXT,
+              PRIMARY KEY (src, dst, kind)
+            );
+            INSERT INTO synapses_v3 SELECT src, dst, kind, weight, last_fired_at FROM synapses;
+            DROP TABLE synapses;
+            ALTER TABLE synapses_v3 RENAME TO synapses;
+            CREATE INDEX IF NOT EXISTS idx_syn_src ON synapses(src);
+            CREATE INDEX IF NOT EXISTS idx_syn_dst ON synapses(dst);
+            """
+        )
+
+
+_MIGRATIONS = {2: _migrate_1_to_2, 3: _migrate_2_to_3}
 
 
 def migrate(conn) -> int:

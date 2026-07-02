@@ -107,3 +107,87 @@ def test_reinforce_duplicate_ids_create_no_self_loop(conn, make_note):
     assert self_loops == 0
     edges = conn.execute("SELECT COUNT(*) AS c FROM synapses WHERE kind = 'hebbian'").fetchone()["c"]
     assert edges == 2
+
+
+def test_importance_stored_and_updatable(conn, embedder):
+    from vault import server
+
+    chunks, vectors = server._embed_note(embedder, "Key fact", "must not fade")
+    nid = store.create_note(conn, "Key fact", "must not fade", [], chunks, vectors, importance=0.9)
+    assert store.read_note(conn, nid)["importance"] == 0.9
+    store.update_note(conn, nid, None, None, None, None, None, importance=0.2)
+    assert store.read_note(conn, nid)["importance"] == 0.2
+    # an update that does not mention importance keeps it
+    store.update_note(conn, nid, None, None, ["x"], None, None)
+    assert store.read_note(conn, nid)["importance"] == 0.2
+
+
+def test_temporal_edges_bind_notes_created_together(conn, make_note):
+    a = make_note("First", "written in the same session")
+    b = make_note("Second", "written moments later")
+    bound = store.add_temporal_edges(conn, b)
+    assert a in bound
+    edges = conn.execute(
+        "SELECT src, dst FROM synapses WHERE kind = 'temporal'"
+    ).fetchall()
+    directed = {(r["src"], r["dst"]) for r in edges}
+    assert (b, a) in directed and (a, b) in directed
+
+
+def test_temporal_edges_skip_old_notes(conn, make_note):
+    old = make_note("Old", "from another day")
+    conn.execute(
+        "UPDATE notes SET created_at = datetime('now', '-1 day') WHERE id = ?", (old,)
+    )
+    conn.commit()
+    fresh = make_note("Fresh", "today's thought")
+    assert store.add_temporal_edges(conn, fresh) == []
+
+
+def test_add_semantic_edges_creates_provisional_bidirectional_edges(conn, make_note):
+    a = make_note("A", "espresso machines")
+    b = make_note("B", "espresso grinders")
+    store.add_semantic_edges(conn, b, [{"id": a, "title": "A", "similarity": 0.8}])
+    directed = {
+        (r["src"], r["dst"])
+        for r in conn.execute("SELECT src, dst FROM synapses WHERE kind = 'semantic'").fetchall()
+    }
+    assert (a, b) in directed and (b, a) in directed
+    # below the floor nothing is created
+    c = make_note("C", "totally unrelated")
+    store.add_semantic_edges(conn, c, [{"id": a, "title": "A", "similarity": 0.1}])
+    touching_c = conn.execute(
+        "SELECT COUNT(*) AS c FROM synapses WHERE src = ? OR dst = ?", (c, c)
+    ).fetchone()["c"]
+    assert touching_c == 0
+
+
+def test_read_note_revives_archived(conn, make_note):
+    nid = make_note("Dormant", "an archived memory")
+    conn.execute("UPDATE notes SET archived_at = datetime('now') WHERE id = ?", (nid,))
+    conn.commit()
+    store.read_note(conn, nid)
+    row = conn.execute("SELECT archived_at FROM notes WHERE id = ?", (nid,)).fetchone()
+    assert row["archived_at"] is None
+    revived = conn.execute(
+        "SELECT COUNT(*) AS c FROM audit_log WHERE action = 'revive' AND note_id = ?", (nid,)
+    ).fetchone()["c"]
+    assert revived == 1
+
+
+def test_touch_access_revives_archived(conn, make_note):
+    nid = make_note("Dormant", "an archived memory")
+    conn.execute("UPDATE notes SET archived_at = datetime('now') WHERE id = ?", (nid,))
+    conn.commit()
+    store.touch_access(conn, [nid])
+    row = conn.execute("SELECT archived_at FROM notes WHERE id = ?", (nid,)).fetchone()
+    assert row["archived_at"] is None
+
+
+def test_update_note_revives_archived(conn, make_note):
+    nid = make_note("Dormant", "an archived memory")
+    conn.execute("UPDATE notes SET archived_at = datetime('now') WHERE id = ?", (nid,))
+    conn.commit()
+    store.update_note(conn, nid, None, None, ["seen"], None, None)
+    row = conn.execute("SELECT archived_at FROM notes WHERE id = ?", (nid,)).fetchone()
+    assert row["archived_at"] is None

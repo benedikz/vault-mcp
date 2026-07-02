@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 
@@ -9,11 +10,14 @@ _LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
 
 def _note_centroids(conn) -> tuple[list[str], np.ndarray]:
-    """Mean of each note's passage vectors, L2-normalized. One row per note."""
+    """Mean of each note's passage vectors, L2-normalized. One row per note.
+    Archived notes are excluded: they leave the semantic web (and the O(n^2)
+    rebuild) but stay fully searchable and revive on use."""
     rows = conn.execute(
         "SELECT c.note_id AS id, vec_to_json(v.embedding) AS vec "
         "FROM notes_vec v JOIN chunks c ON c.seq = v.rowid "
-        "JOIN notes n ON n.id = c.note_id WHERE n.deleted_at IS NULL"
+        "JOIN notes n ON n.id = c.note_id "
+        "WHERE n.deleted_at IS NULL AND n.archived_at IS NULL"
     ).fetchall()
     sums: dict[str, np.ndarray] = {}
     counts: dict[str, int] = {}
@@ -35,11 +39,14 @@ def _note_centroids(conn) -> tuple[list[str], np.ndarray]:
     return ids, matrix / norms
 
 
-def _rebuild_semantic(conn, stats: dict) -> None:
+def _rebuild_semantic(conn, stats: dict) -> list[tuple[str, str, float]]:
+    """Rebuild semantic edges and flag duplicates. Returns the strongly
+    similar pairs (cosine >= CLUSTER_FLOOR) for gist-cluster detection."""
+    cluster_pairs: list[tuple[str, str, float]] = []
     ids, matrix = _note_centroids(conn)
     count = len(ids)
     if count < 2:
-        return
+        return cluster_pairs
     block = 512
     top_k = min(config.SEM_TOPK, count - 1)
     with conn:
@@ -61,6 +68,8 @@ def _rebuild_semantic(conn, stats: dict) -> None:
                         (ids[global_i], ids[j], score),
                     )
                     stats["semantic"] += 1
+                    if score >= config.CLUSTER_FLOOR and ids[global_i] < ids[j]:
+                        cluster_pairs.append((ids[global_i], ids[j], score))
                     if score >= config.DEDUP_FLOOR and ids[global_i] < ids[j]:
                         conn.execute(
                             "INSERT INTO duplicate_candidates(a, b, score) VALUES(?, ?, ?) "
@@ -69,6 +78,7 @@ def _rebuild_semantic(conn, stats: dict) -> None:
                             (ids[global_i], ids[j], score),
                         )
                         stats["duplicates"] += 1
+    return cluster_pairs
 
 
 def _rebuild_links(conn, stats: dict) -> None:
@@ -93,6 +103,92 @@ def _rebuild_links(conn, stats: dict) -> None:
                         (row["id"], dst),
                     )
                     stats["link"] += 1
+
+
+def _archive_stale(conn, stats: dict) -> None:
+    """Active forgetting, without erasing. Demote notes that are idle past
+    ARCHIVE_AFTER_DAYS, structurally peripheral (salience from the previous
+    pass below the ceiling) and not declared important. An archived note keeps
+    its content, versions, chunks and index entries; it is only score-penalized
+    in retrieval and excluded from the semantic rebuild, and any recall, read
+    or edit revives it (store._revive)."""
+    with conn:
+        cur = conn.execute(
+            "UPDATE notes SET archived_at = datetime('now') WHERE id IN ("
+            "  SELECT n.id FROM notes n LEFT JOIN node_stats s ON s.note_id = n.id"
+            "  WHERE n.deleted_at IS NULL AND n.archived_at IS NULL"
+            "    AND n.importance < ?"
+            "    AND COALESCE(s.salience, 0) < ?"
+            "    AND julianday('now') - julianday(MAX(n.updated_at, "
+            "        COALESCE(s.last_accessed_at, n.updated_at))) > ?"
+            ")",
+            (config.ARCHIVE_IMPORTANCE_EXEMPT, config.ARCHIVE_SALIENCE_CEILING,
+             config.ARCHIVE_AFTER_DAYS),
+        )
+        stats["archived"] = cur.rowcount
+
+
+def _flag_clusters(conn, pairs: list[tuple[str, str, float]], stats: dict) -> None:
+    """Systems consolidation, agent-in-the-loop: connected components of the
+    strongly-similar pairs are flagged so the agent can distill each group
+    into a gist note that wiki-links its members. A group already covered by
+    such a hub is not re-flagged, so the queue self-heals after synthesis.
+    Must run after _rebuild_links so hub detection sees fresh link edges."""
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for a, b, _ in pairs:
+        parent.setdefault(a, a)
+        parent.setdefault(b, b)
+        parent[find(a)] = find(b)
+
+    groups: dict[str, list[str]] = {}
+    scores: dict[str, list[float]] = {}
+    for a, b, score in pairs:
+        root = find(a)
+        groups.setdefault(root, [])
+        scores.setdefault(root, []).append(score)
+    for note_id in parent:
+        groups[find(note_id)].append(note_id)
+
+    with conn:
+        conn.execute("DELETE FROM cluster_candidates")
+        for root, members in groups.items():
+            if len(members) < config.CLUSTER_MIN_SIZE:
+                continue
+            if _has_hub(conn, members):
+                continue
+            members = sorted(members)
+            key = hashlib.sha1("|".join(members).encode("utf-8")).hexdigest()[:16]
+            mean_score = sum(scores[root]) / len(scores[root])
+            conn.execute(
+                "INSERT INTO cluster_candidates(key, members, score) VALUES(?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET score = excluded.score, "
+                "created_at = datetime('now')",
+                (key, json.dumps(members), mean_score),
+            )
+            stats["clusters"] += 1
+
+
+def _has_hub(conn, members: list[str]) -> bool:
+    """True when one note's link edges already cover most of the group — the
+    gist note exists, whether it is a member or an outside summary note."""
+    placeholders = ",".join("?" for _ in members)
+    row = conn.execute(
+        f"SELECT src, COUNT(DISTINCT dst) AS covered FROM synapses "
+        f"WHERE kind = 'link' AND dst IN ({placeholders}) "
+        f"GROUP BY src ORDER BY covered DESC LIMIT 1",
+        members,
+    ).fetchone()
+    if row is None:
+        return False
+    linkable = len(members) - 1 if row["src"] in members else len(members)
+    return row["covered"] >= config.CLUSTER_HUB_COVERAGE * linkable
 
 
 def _decay_and_prune(conn, stats: dict) -> None:
@@ -138,10 +234,15 @@ def _recompute_salience(conn, stats: dict) -> None:
 
 
 def consolidate(conn) -> dict:
-    stats = {"semantic": 0, "link": 0, "pruned": 0, "orphaned": 0, "salient_nodes": 0, "duplicates": 0}
+    stats = {"semantic": 0, "link": 0, "pruned": 0, "orphaned": 0,
+             "salient_nodes": 0, "duplicates": 0, "archived": 0, "clusters": 0}
     with db.lock:
-        _rebuild_semantic(conn, stats)
+        # archive first (using last pass's salience) so demoted notes drop out
+        # of this pass's semantic rebuild
+        _archive_stale(conn, stats)
+        cluster_pairs = _rebuild_semantic(conn, stats)
         _rebuild_links(conn, stats)
+        _flag_clusters(conn, cluster_pairs, stats)
         _decay_and_prune(conn, stats)
         _recompute_salience(conn, stats)
         with conn:

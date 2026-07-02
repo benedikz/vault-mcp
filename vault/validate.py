@@ -4,7 +4,7 @@ from vault import config
 from vault.errors import ValidationError
 
 _ID_RE = re.compile(r"\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
-_KINDS = {"link", "semantic", "hebbian"}
+_KINDS = {"link", "semantic", "hebbian", "temporal"}
 
 
 def text(value: object, max_len: int, field: str) -> str:
@@ -61,6 +61,14 @@ def id_list(value: object, field: str = "ids") -> list[str]:
     if len(value) > config.MAX_K:
         raise ValidationError(f"{field} has too many entries")
     return [note_id(item, field) for item in value]
+
+
+def importance(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValidationError("importance must be a number")
+    if not 0.0 <= float(value) <= 1.0:
+        raise ValidationError("importance must be between 0 and 1")
+    return float(value)
 
 
 def weight(value: object) -> float:

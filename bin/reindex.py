@@ -5,6 +5,9 @@ note to one vector per passage). Idempotent: safe to run again.
 
     export VAULT_KEY=... VAULT_DB_PATH=...
     .venv/bin/python bin/reindex.py
+
+Pass --schema-only to apply schema migrations without re-embedding (enough
+for migrations that don't change vectors, e.g. v2 -> v3).
 """
 
 import os
@@ -16,10 +19,17 @@ from vault import chunk, config, db, embed, store  # noqa: E402
 
 
 def main() -> None:
+    schema_only = "--schema-only" in sys.argv[1:]
     cfg = config.load()
-    embedder = embed.build(cfg)
     conn = db.connect(cfg)
 
+    if schema_only:
+        applied = db.migrate(conn)
+        conn.close()
+        print(f"schema migrations applied: {applied}\ndone (schema only, vectors untouched).")
+        return
+
+    embedder = embed.build(cfg)
     stored_dim = db.get_meta(conn, "dim")
     if stored_dim != str(embedder.dim):
         raise SystemExit(

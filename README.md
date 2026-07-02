@@ -14,9 +14,17 @@ Designed to run on a Raspberry Pi behind a Cloudflare Tunnel.
   into overlapping passages and embedded per-passage, so dense retrieval sees the whole
   note instead of the first ~512 tokens. Ranking also blends in a recency factor.
 - **Brain-like metadata.** Notes are neurons; synapses are typed weighted edges
-  (`link`, `semantic`, `hebbian`). Co-recalled notes reinforce each other; a
-  consolidation pass rebuilds semantic/link edges, decays unused ones, and recomputes
-  salience.
+  (`link`, `semantic`, `hebbian`, `temporal`). Co-recalled notes reinforce each other
+  (Hebbian learning); recalling a note strengthens the note itself, so what you use
+  ranks higher (the testing effect); notes written in the same session are weakly
+  time-bound (temporal contiguity); notes can carry an agent-declared `importance`
+  (0..1) that boosts ranking and blocks auto-archiving. A consolidation pass rebuilds
+  semantic/link edges, decays unused ones, recomputes salience, archives stale notes
+  (reversibly — see below), and flags duplicate pairs and gist clusters.
+- **Forgetting without erasing.** Consolidation demotes stale, unused, unimportant
+  notes to an archive tier: the note keeps its content, versions, and index entries;
+  it is only down-ranked in retrieval and dropped from the semantic-edge rebuild. Any
+  recall, read, or edit revives it. Nothing is ever deleted by the vault itself.
 - **Local embeddings.** Vectors are produced on the Pi by a small ONNX model via
   `fastembed` — no third-party embedding vendor ever sees your text.
 
@@ -115,12 +123,13 @@ claude mcp add --transport http brain https://vault.example.com/mcp \
 
 | Tool | Purpose |
 |------|---------|
-| `create_note` / `update_note` / `trash_note` / `read_note` | CRUD; updates keep version history; trash is reversible |
-| `search` | fast hybrid search (vectors + BM25) |
-| `recall` | associative recall: hybrid seed → spreading activation → rerank → cited context |
+| `create_note` / `update_note` / `trash_note` / `read_note` | CRUD; updates keep version history; trash is reversible. `create_note` accepts `importance` (0..1) and returns the nearest existing notes (with `near_duplicate` flags) so the agent can link, merge, or reconcile contradictions at write time |
+| `search` | fast hybrid search (vectors + BM25); archived hits carry `archived: true` |
+| `recall` | associative recall: hybrid seed → spreading activation → rerank → cited context; recalled notes get stronger and archived ones revive |
 | `neighbors` / `connect` / `reinforce` | inspect and shape the synapse graph |
 | `review_duplicates` | list near-duplicate note pairs flagged by consolidation (you decide whether to merge) |
-| `consolidate_now` | rebuild semantic/link edges, decay, flag duplicates, recompute salience |
+| `review_clusters` | list dense groups of similar notes flagged as gist candidates — distill one by writing a summary note that wiki-links members as `[[id:<note id>]]` |
+| `consolidate_now` | run the sleep pass on demand (see below) |
 
 ## Consolidation (the "sleep" pass)
 
@@ -137,10 +146,25 @@ journalctl -u vault-consolidate.service -n 20 --no-pager
 systemctl list-timers vault-consolidate.timer --no-pager
 ```
 
-It rebuilds semantic/link edges, decays and prunes stale Hebbian edges, recomputes
-salience, and flags near-duplicate notes (cosine ≥ `DEDUP_FLOOR`) into
-`review_duplicates` for you to merge or keep — the vault never auto-merges. The pass
-runs against the DB only (no model load) and is safe to run while the server is idle.
+The pass, in order:
+
+1. **Archive** stale notes — idle past `ARCHIVE_AFTER_DAYS`, low salience, and
+   `importance` below the exemption. Archiving is demotion, not deletion: content,
+   versions, chunks, and vectors all stay; the note is score-penalized in retrieval
+   and excluded from the semantic rebuild; any recall/read/edit revives it (audited
+   as `revive`).
+2. **Rebuild** semantic edges (cosine top-k over live, non-archived notes) and
+   `[[wikilink]]` edges.
+3. **Flag** near-duplicate pairs (cosine ≥ `DEDUP_FLOOR`) into `review_duplicates`
+   and dense similarity clusters (≥ `CLUSTER_MIN_SIZE` notes pairwise ≥
+   `CLUSTER_FLOOR`) into `review_clusters` for the agent to distill into gist notes —
+   the vault never merges or summarizes on its own. A cluster already covered by a
+   hub note that links most members is not re-flagged.
+4. **Decay** and prune stale Hebbian edges, sweep edges of trashed notes, and
+   recompute salience.
+
+The pass runs against the DB only (no model load) and is safe to run while the
+server is idle.
 
 ## Import existing notes
 
@@ -182,6 +206,13 @@ with the **original** `VAULT_MODEL`:
 
 ```bash
 .venv/bin/python bin/reindex.py
+```
+
+Migrations that do not touch vectors (e.g. v2→v3, which adds importance, archiving,
+temporal edges, and cluster candidates) can skip the re-embed:
+
+```bash
+.venv/bin/python bin/reindex.py --schema-only
 ```
 
 ## Tests

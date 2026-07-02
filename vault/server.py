@@ -35,6 +35,15 @@ def _embed_note(embedder, title: str, body: str):
     return chunks, vectors
 
 
+def _centroid(vectors) -> list[float]:
+    """Mean of the passage vectors, L2-normalized — the note's location in
+    embedding space, used for the encoding-time neighbor lookup."""
+    dim = len(vectors[0])
+    mean = [sum(v[i] for v in vectors) / len(vectors) for i in range(dim)]
+    norm = sum(x * x for x in mean) ** 0.5 or 1.0
+    return [x / norm for x in mean]
+
+
 def _security_kwargs(cfg) -> dict:
     """Host/DNS-rebinding validation for the streamable HTTP transport.
 
@@ -68,24 +77,39 @@ def build_mcp(cfg, conn, embedder):
     mcp = FastMCP("brain-vault", **_security_kwargs(cfg))
 
     @mcp.tool()
-    def create_note(title: str, body: str, tags: list[str] | None = None) -> dict:
-        """Store a new note and index it for semantic and keyword retrieval."""
+    def create_note(title: str, body: str, tags: list[str] | None = None,
+                    importance: float = 0.0) -> dict:
+        """Store a new note and index it for semantic and keyword retrieval.
+        importance (0..1) boosts ranking and exempts the note from auto-archiving.
+        Returns the nearest existing notes (with near_duplicate flags) so you can
+        immediately link related notes, merge duplicates, or reconcile a
+        contradiction with what is already stored."""
         clean_title = validate.text(title, config.MAX_TITLE, "title")
         clean_body = validate.text(body, config.MAX_BODY, "body")
         clean_tags = validate.tags(tags)
+        clean_importance = validate.importance(importance)
         chunks, vectors = _embed_note(embedder, clean_title, clean_body)
+        centroid = _centroid(vectors)
         with db.lock:
-            note_id = store.create_note(conn, clean_title, clean_body, clean_tags, chunks, vectors)
-        return {"id": note_id}
+            note_id = store.create_note(conn, clean_title, clean_body, clean_tags,
+                                        chunks, vectors, clean_importance)
+            related = retrieve.nearest_notes(conn, centroid, config.ENCODE_RELATED_K,
+                                             exclude=note_id)
+            store.add_semantic_edges(conn, note_id, related)
+            store.add_temporal_edges(conn, note_id)
+        for r in related:
+            r["near_duplicate"] = r["similarity"] >= config.DEDUP_FLOOR
+        return {"id": note_id, "related": related}
 
     @mcp.tool()
     def update_note(id: str, title: str | None = None, body: str | None = None,
-                    tags: list[str] | None = None) -> dict:
+                    tags: list[str] | None = None, importance: float | None = None) -> dict:
         """Edit a note; the previous version is snapshotted and recoverable."""
         nid = validate.note_id(id)
         new_title = validate.optional_text(title, config.MAX_TITLE, "title")
         new_body = validate.optional_text(body, config.MAX_BODY, "body")
         clean_tags = validate.tags(tags) if tags is not None else None
+        clean_importance = validate.importance(importance) if importance is not None else None
         chunks = vectors = None
         if new_title is not None or new_body is not None:
             with db.lock:
@@ -94,7 +118,8 @@ def build_mcp(cfg, conn, embedder):
             merged_body = new_body if new_body is not None else current["body"]
             chunks, vectors = _embed_note(embedder, merged_title, merged_body)
         with db.lock:
-            store.update_note(conn, nid, new_title, new_body, clean_tags, chunks, vectors)
+            store.update_note(conn, nid, new_title, new_body, clean_tags, chunks, vectors,
+                              clean_importance)
         return {"id": nid, "status": "updated"}
 
     @mcp.tool()
@@ -120,7 +145,7 @@ def build_mcp(cfg, conn, embedder):
         vector = embedder.embed_query(clean_query)
         with db.lock:
             results = retrieve.search(conn, vector, clean_query, limit)
-        return [{"id": c.id, "title": c.title} for c in results]
+        return [{"id": c.id, "title": c.title, "archived": c.archived} for c in results]
 
     @mcp.tool()
     def recall(query: str, depth: int = 2, max_tokens: int = 4000) -> dict:
@@ -140,8 +165,11 @@ def build_mcp(cfg, conn, embedder):
             ids = [c.id for c in used]
             with db.lock:
                 store.reinforce(conn, ids)
-                store.touch_access(conn, ids)
-        return {"context": context, "notes": [{"id": c.id, "title": c.title} for c in used]}
+                store.touch_access(conn, ids)  # also revives archived notes
+        # archived=True marks a note that surfaced from the archive tier (this
+        # recall just revived it)
+        return {"context": context,
+                "notes": [{"id": c.id, "title": c.title, "archived": c.archived} for c in used]}
 
     @mcp.tool()
     def neighbors(id: str) -> list[dict]:
@@ -177,8 +205,20 @@ def build_mcp(cfg, conn, embedder):
             return store.list_duplicates(conn, capped)
 
     @mcp.tool()
+    def review_clusters(limit: int = 20) -> list[dict]:
+        """List dense groups of similar notes flagged by consolidation as gist candidates.
+        To distill one: write a summary note whose body wiki-links each member as
+        [[id:<note id>]]; once a note links most of a group, the group stops being
+        flagged. The vault never merges or summarizes on its own."""
+        capped = validate.bounded_int(limit, 1, config.MAX_K, "limit")
+        with db.lock:
+            return store.list_clusters(conn, capped)
+
+    @mcp.tool()
     def consolidate_now() -> dict:
-        """Rebuild semantic and link edges from stored vectors, decay/prune Hebbian edges, flag duplicates, recompute salience."""
+        """Run the sleep pass: archive stale notes (reversible — they revive on any use),
+        rebuild semantic and link edges, flag duplicate pairs and gist clusters,
+        decay/prune Hebbian edges, recompute salience."""
         return consolidate.consolidate(conn)
 
     return mcp

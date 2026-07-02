@@ -13,6 +13,7 @@ class Candidate:
     id: str
     title: str
     body: str
+    archived: bool = False
 
 
 def _fts_query(query: str) -> str:
@@ -43,6 +44,36 @@ def dense_knn(conn, query_vector, k: int) -> list[str]:
         if len(ordered) >= k:
             break
     return ordered
+
+
+def nearest_notes(conn, vector, k: int, exclude: str | None = None) -> list[dict]:
+    """Nearest live notes by best-passage similarity. The vec0 table uses
+    cosine distance, so similarity = 1 - distance."""
+    blob = sqlite_vec.serialize_float32(vector)
+    fetch = min(k * 8, config.MAX_FETCH)
+    rows = conn.execute(
+        "SELECT c.note_id AS id, n.title AS title, knn.distance AS distance "
+        "FROM (SELECT rowid, distance FROM notes_vec WHERE embedding MATCH ? AND k = ?) AS knn "
+        "JOIN chunks c ON c.seq = knn.rowid "
+        "JOIN notes n ON n.id = c.note_id "
+        "WHERE n.deleted_at IS NULL "
+        "ORDER BY knn.distance",
+        (blob, fetch),
+    ).fetchall()
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        if row["id"] in seen or row["id"] == exclude:
+            continue
+        seen.add(row["id"])
+        out.append({
+            "id": row["id"],
+            "title": row["title"],
+            "similarity": round(max(0.0, 1.0 - row["distance"]), 4),
+        })
+        if len(out) >= k:
+            break
+    return out
 
 
 def keyword_bm25(conn, query: str, k: int) -> list[str]:
@@ -126,12 +157,44 @@ def apply_recency(conn, scores: dict[str, float],
         scores[note_id] *= (1.0 - weight) + weight * decay
 
 
+def apply_strength(conn, scores: dict[str, float]) -> None:
+    """Memory-strength factors:
+    - retrieval practice (testing effect): notes actually recalled or read
+      before are easier to recall again — saturating in access count, fading
+      with time since last access;
+    - importance declared at encoding;
+    - archive penalty: archived notes are demoted in ranking, never hidden.
+    """
+    if not scores:
+        return
+    ids = list(scores.keys())
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"SELECT n.id AS id, n.importance AS importance, "
+        f"n.archived_at IS NOT NULL AS archived, "
+        f"COALESCE(s.access_count, 0) AS accesses, "
+        f"julianday('now') - julianday(COALESCE(s.last_accessed_at, n.updated_at)) AS idle_days "
+        f"FROM notes n LEFT JOIN node_stats s ON s.note_id = n.id "
+        f"WHERE n.id IN ({placeholders})",
+        ids,
+    ).fetchall()
+    for row in rows:
+        practice = row["accesses"] / (row["accesses"] + config.PRACTICE_SAT)
+        practice *= 0.5 ** (max(0.0, row["idle_days"] or 0.0) / config.PRACTICE_HALFLIFE_DAYS)
+        factor = (1.0 + config.PRACTICE_WEIGHT * practice)
+        factor *= (1.0 + config.IMPORTANCE_WEIGHT * row["importance"])
+        if row["archived"]:
+            factor *= config.ARCHIVE_PENALTY
+        scores[row["id"]] *= factor
+
+
 def load(conn, ids: list[str]) -> list[Candidate]:
     if not ids:
         return []
     placeholders = ",".join("?" for _ in ids)
     rows = conn.execute(
-        f"SELECT id, title, body FROM notes WHERE id IN ({placeholders}) AND deleted_at IS NULL",
+        f"SELECT id, title, body, archived_at FROM notes "
+        f"WHERE id IN ({placeholders}) AND deleted_at IS NULL",
         ids,
     ).fetchall()
     by_id = {row["id"]: row for row in rows}
@@ -139,13 +202,15 @@ def load(conn, ids: list[str]) -> list[Candidate]:
     for note_id in ids:
         row = by_id.get(note_id)
         if row is not None:
-            out.append(Candidate(id=row["id"], title=row["title"], body=row["body"]))
+            out.append(Candidate(id=row["id"], title=row["title"], body=row["body"],
+                                 archived=row["archived_at"] is not None))
     return out
 
 
 def search(conn, query_vector, query: str, k: int) -> list[Candidate]:
     seeds = rrf_fuse([dense_knn(conn, query_vector, k), keyword_bm25(conn, query, k)])
     apply_recency(conn, seeds)
+    apply_strength(conn, seeds)
     ordered = [i for i, _ in sorted(seeds.items(), key=lambda kv: kv[1], reverse=True)][:k]
     return load(conn, ordered)
 
@@ -157,6 +222,7 @@ def recall(conn, query_vector, query: str, depth: int, k: int) -> list[Candidate
     subset = {note_id: score for note_id, score in top}
     apply_salience(conn, subset)
     apply_recency(conn, subset)
+    apply_strength(conn, subset)
     ordered = [i for i, _ in sorted(subset.items(), key=lambda kv: kv[1], reverse=True)]
     return load(conn, ordered)
 

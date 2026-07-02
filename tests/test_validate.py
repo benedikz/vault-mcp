@@ -54,3 +54,21 @@ def test_id_list_requires_nonempty_uuids():
         validate.id_list([])
     with pytest.raises(ValidationError):
         validate.id_list(["bad"])
+
+
+def test_importance_bounds():
+    assert validate.importance(0) == 0.0
+    assert validate.importance(0.7) == 0.7
+    assert validate.importance(1) == 1.0
+    with pytest.raises(ValidationError):
+        validate.importance(1.1)
+    with pytest.raises(ValidationError):
+        validate.importance(-0.1)
+    with pytest.raises(ValidationError):
+        validate.importance(True)
+    with pytest.raises(ValidationError):
+        validate.importance("high")
+
+
+def test_temporal_is_a_valid_kind():
+    assert validate.kind("temporal") == "temporal"

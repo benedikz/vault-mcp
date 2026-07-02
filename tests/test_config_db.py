@@ -36,3 +36,45 @@ def test_migrate_from_v1_is_idempotent(conn):
     assert db.get_meta(conn, "schema_version") == str(config.SCHEMA_VERSION)
     # running again does nothing
     assert db.migrate(conn) == 0
+
+
+def test_migrate_2_to_3_restores_v3_shape(conn, make_note):
+    a = make_note("A", "alpha")
+    b = make_note("B", "beta")
+    with conn:
+        conn.execute(
+            "INSERT INTO synapses(src, dst, kind, weight) VALUES(?, ?, 'link', 1.0)", (a, b)
+        )
+    # devolve the schema to a genuine v2 shape
+    with conn:
+        conn.executescript(
+            """
+            DROP INDEX idx_notes_archived;
+            ALTER TABLE notes DROP COLUMN importance;
+            ALTER TABLE notes DROP COLUMN archived_at;
+            DROP TABLE cluster_candidates;
+            DROP TABLE synapses;
+            CREATE TABLE synapses (
+              src TEXT NOT NULL, dst TEXT NOT NULL,
+              kind TEXT NOT NULL CHECK (kind IN ('link','semantic','hebbian')),
+              weight REAL NOT NULL DEFAULT 0, last_fired_at TEXT,
+              PRIMARY KEY (src, dst, kind));
+            """
+        )
+        conn.execute(
+            "INSERT INTO synapses(src, dst, kind, weight) VALUES(?, ?, 'link', 1.0)", (a, b)
+        )
+        db.set_meta(conn, "schema_version", "2")
+    assert db.migrate(conn) == 1
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(notes)").fetchall()}
+    assert {"importance", "archived_at"} <= cols
+    # existing edges survive the synapses rebuild and 'temporal' is now allowed
+    kept = conn.execute("SELECT COUNT(*) AS c FROM synapses WHERE kind = 'link'").fetchone()["c"]
+    assert kept == 1
+    with conn:
+        conn.execute(
+            "INSERT INTO synapses(src, dst, kind, weight) VALUES(?, ?, 'temporal', 0.3)", (b, a)
+        )
+    conn.execute("SELECT COUNT(*) FROM cluster_candidates").fetchone()
+    # running again does nothing
+    assert db.migrate(conn) == 0

@@ -74,3 +74,71 @@ def test_recency_prefers_newer_among_equal(conn, embedder, make_note):
     scores = {older: 1.0, newer: 1.0}
     retrieve.apply_recency(conn, scores)
     assert scores[newer] > scores[older]
+
+
+def test_practice_boosts_recalled_note(conn, make_note):
+    practiced = make_note("One", "identical body content alpha")
+    fresh = make_note("Two", "identical body content alpha")
+    conn.execute(
+        "UPDATE node_stats SET access_count = 10, last_accessed_at = datetime('now') "
+        "WHERE note_id = ?",
+        (practiced,),
+    )
+    conn.commit()
+    scores = {practiced: 1.0, fresh: 1.0}
+    retrieve.apply_strength(conn, scores)
+    assert scores[practiced] > scores[fresh]
+
+
+def test_practice_boost_fades_when_stale(conn, make_note):
+    recent = make_note("One", "identical body content alpha")
+    stale = make_note("Two", "identical body content alpha")
+    conn.execute(
+        "UPDATE node_stats SET access_count = 10, last_accessed_at = datetime('now') "
+        "WHERE note_id = ?",
+        (recent,),
+    )
+    conn.execute(
+        "UPDATE node_stats SET access_count = 10, "
+        "last_accessed_at = datetime('now', '-1000 days') WHERE note_id = ?",
+        (stale,),
+    )
+    conn.commit()
+    scores = {recent: 1.0, stale: 1.0}
+    retrieve.apply_strength(conn, scores)
+    assert scores[recent] > scores[stale]
+
+
+def test_importance_boosts_ranking(conn, make_note):
+    vital = make_note("One", "identical body content alpha")
+    plain = make_note("Two", "identical body content alpha")
+    conn.execute("UPDATE notes SET importance = 1.0 WHERE id = ?", (vital,))
+    conn.commit()
+    scores = {vital: 1.0, plain: 1.0}
+    retrieve.apply_strength(conn, scores)
+    assert scores[vital] > scores[plain]
+
+
+def test_archived_note_demoted_but_still_searchable(conn, embedder, make_note):
+    archived = make_note("Buried", "quantum widget calibration procedure")
+    live = make_note("Active", "quantum widget calibration procedure")
+    conn.execute("UPDATE notes SET archived_at = datetime('now') WHERE id = ?", (archived,))
+    conn.commit()
+    vec = embedder.embed_query("quantum widget calibration")
+    results = retrieve.search(conn, vec, "quantum widget calibration", 5)
+    ids = [c.id for c in results]
+    assert archived in ids and live in ids     # never hidden
+    assert ids.index(live) < ids.index(archived)  # but demoted
+    flags = {c.id: c.archived for c in results}
+    assert flags[archived] is True and flags[live] is False
+
+
+def test_nearest_notes_finds_similar_and_excludes_self(conn, embedder, make_note):
+    espresso = make_note("Espresso", "espresso machines grinders portafilter")
+    make_note("Gardening", "tomato seedlings and compost")
+    vec = embedder.embed_query("espresso machines grinders")
+    hits = retrieve.nearest_notes(conn, vec, 3)
+    assert hits and hits[0]["id"] == espresso
+    assert 0.0 < hits[0]["similarity"] <= 1.0
+    excluded = retrieve.nearest_notes(conn, vec, 3, exclude=espresso)
+    assert all(h["id"] != espresso for h in excluded)

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from vault.errors import ConfigError
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 RRF_K = 60
 SEED_K = 24
@@ -30,6 +30,44 @@ CHUNK_MAX = 256
 # fresher notes are preferred among otherwise comparable matches.
 RECENCY_HALFLIFE_DAYS = 180.0
 RECENCY_WEIGHT = 0.3
+
+# Retrieval practice ("testing effect"): a note that is actually recalled or
+# read becomes easier to recall again. The boost saturates with access count
+# and fades with time since the last access.
+PRACTICE_WEIGHT = 0.3
+PRACTICE_SAT = 5.0
+PRACTICE_HALFLIFE_DAYS = 90.0
+
+# Agent-declared importance (0..1) set at encoding, blended into ranking.
+IMPORTANCE_WEIGHT = 0.5
+
+# Archiving = forgetting without erasing. Consolidation demotes notes that are
+# stale, structurally peripheral and not important. Archived notes keep their
+# content, versions and index entries — they are only score-penalized and drop
+# out of the semantic-edge rebuild — and any recall or read revives them.
+ARCHIVE_AFTER_DAYS = 180
+ARCHIVE_SALIENCE_CEILING = 0.2
+ARCHIVE_IMPORTANCE_EXEMPT = 0.7
+ARCHIVE_PENALTY = 0.35
+
+# Temporal contiguity: a new note is weakly bound to the notes created just
+# before it, so "what else was on my mind then" is recallable via the graph.
+TEMPORAL_WINDOW_MINUTES = 90
+TEMPORAL_TOPK = 3
+TEMPORAL_WEIGHT = 0.3
+
+# Encoding-time binding: create_note looks up the nearest existing notes so the
+# agent can link/deduplicate/reconcile immediately, and provisional semantic
+# edges make the new note graph-reachable before the next consolidation.
+ENCODE_RELATED_K = 5
+
+# Gist clusters: consolidation flags dense groups of mutually similar notes
+# (pairwise cosine >= CLUSTER_FLOOR, at least CLUSTER_MIN_SIZE members) for the
+# agent to synthesize into a summary note. A group already covered by a hub
+# note that wiki-links most members is not re-flagged.
+CLUSTER_FLOOR = 0.80
+CLUSTER_MIN_SIZE = 3
+CLUSTER_HUB_COVERAGE = 0.6
 
 # Consolidation flags note pairs above this cosine similarity as likely
 # duplicates for the agent to review (it never auto-merges).

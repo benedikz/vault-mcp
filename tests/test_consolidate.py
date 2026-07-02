@@ -58,6 +58,70 @@ def test_salience_normalized_to_unit_peak(conn, make_note):
     assert peak is None or peak <= 1.0 + 1e-9
 
 
+def test_stale_note_archived_important_and_recalled_notes_kept(conn, make_note):
+    stale = make_note("Stale", "old forgotten fragment")
+    vital = make_note("Vital", "old but declared important")
+    used = make_note("Used", "old but recently recalled")
+    conn.execute("UPDATE notes SET updated_at = datetime('now', '-400 days')")
+    conn.execute("UPDATE notes SET importance = 0.9 WHERE id = ?", (vital,))
+    conn.execute(
+        "UPDATE node_stats SET last_accessed_at = datetime('now') WHERE note_id = ?", (used,)
+    )
+    conn.commit()
+    stats = consolidate.consolidate(conn)
+    assert stats["archived"] == 1
+    rows = {
+        r["id"]: r["archived_at"]
+        for r in conn.execute("SELECT id, archived_at FROM notes").fetchall()
+    }
+    assert rows[stale] is not None
+    assert rows[vital] is None
+    assert rows[used] is None
+    # archiving never touches content, versions, chunks or vectors
+    assert store.read_note(conn, stale)["body"] == "old forgotten fragment"
+
+
+def test_archived_note_leaves_semantic_web(conn, make_note):
+    a = make_note("Cats one", "cats are small domestic feline animals")
+    b = make_note("Cats two", "cats small domestic feline animals pets")
+    make_note("Cats three", "small domestic cats feline pets animals")
+    conn.execute("UPDATE notes SET archived_at = datetime('now') WHERE id = ?", (a,))
+    conn.commit()
+    consolidate.consolidate(conn)
+    touching = conn.execute(
+        "SELECT COUNT(*) AS c FROM synapses WHERE kind = 'semantic' AND (src = ? OR dst = ?)",
+        (a, a),
+    ).fetchone()["c"]
+    assert touching == 0
+    edge = conn.execute(
+        "SELECT 1 FROM synapses WHERE kind = 'semantic' AND src = ?", (b,)
+    ).fetchone()
+    assert edge is not None
+
+
+def test_cluster_flagged_for_dense_group(conn, make_note):
+    a = make_note("Sourdough one", "sourdough bread recipe rye flour starter hydration")
+    b = make_note("Sourdough two", "sourdough bread recipe rye flour starter proofing")
+    c = make_note("Sourdough three", "sourdough bread recipe rye flour starter baking")
+    make_note("Rockets", "orbital rocket propulsion thrust nozzle")
+    stats = consolidate.consolidate(conn)
+    assert stats["clusters"] == 1
+    clusters = store.list_clusters(conn)
+    assert len(clusters) == 1
+    member_ids = {n["id"] for n in clusters[0]["notes"]}
+    assert member_ids == {a, b, c}
+
+
+def test_cluster_with_gist_hub_not_reflagged(conn, make_note):
+    a = make_note("Sourdough one", "sourdough bread recipe rye flour starter hydration")
+    b = make_note("Sourdough two", "sourdough bread recipe rye flour starter proofing")
+    c = make_note("Sourdough three", "sourdough bread recipe rye flour starter baking")
+    make_note("Gist", f"Sourdough overview: [[id:{a}]] [[id:{b}]] [[id:{c}]]")
+    stats = consolidate.consolidate(conn)
+    assert stats["clusters"] == 0
+    assert store.list_clusters(conn) == []
+
+
 def test_hebbian_decay_and_prune(conn, make_note):
     a = make_note("A", "alpha")
     b = make_note("B", "beta")

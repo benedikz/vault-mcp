@@ -38,12 +38,13 @@ def _drop_chunks(conn, note_id: str) -> None:
 
 
 def create_note(conn, title: str, body: str, tags: list[str],
-                chunks: list[str], vectors: list[list[float]]) -> str:
+                chunks: list[str], vectors: list[list[float]],
+                importance: float = 0.0) -> str:
     note_id = str(uuid.uuid4())
     with conn:
         cur = conn.execute(
-            "INSERT INTO notes(id, title, body, tags) VALUES(?, ?, ?, ?)",
-            (note_id, title, body, json.dumps(tags, ensure_ascii=False)),
+            "INSERT INTO notes(id, title, body, tags, importance) VALUES(?, ?, ?, ?, ?)",
+            (note_id, title, body, json.dumps(tags, ensure_ascii=False), importance),
         )
         seq = cur.lastrowid
         conn.execute("INSERT INTO notes_fts(rowid, title, body) VALUES(?, ?, ?)", (seq, title, body))
@@ -62,9 +63,23 @@ def peek(conn, note_id: str) -> dict:
     return {"title": row["title"], "body": row["body"]}
 
 
+def _revive(conn, ids: list[str]) -> None:
+    """Any retrieval of an archived note returns it to the live tier
+    (spontaneous recovery) — archiving demotes, it never loses anything.
+    Caller holds the transaction."""
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"SELECT id FROM notes WHERE id IN ({placeholders}) AND archived_at IS NOT NULL",
+        ids,
+    ).fetchall()
+    for row in rows:
+        conn.execute("UPDATE notes SET archived_at = NULL WHERE id = ?", (row["id"],))
+        _audit(conn, "revive", row["id"])
+
+
 def read_note(conn, note_id: str) -> dict:
     row = conn.execute(
-        "SELECT id, title, body, tags, version, updated_at "
+        "SELECT id, title, body, tags, version, importance, updated_at "
         "FROM notes WHERE id = ? AND deleted_at IS NULL",
         (note_id,),
     ).fetchone()
@@ -76,6 +91,7 @@ def read_note(conn, note_id: str) -> dict:
             "last_accessed_at = datetime('now') WHERE note_id = ?",
             (note_id,),
         )
+        _revive(conn, [note_id])
         _audit(conn, "read", note_id)
     return {
         "id": row["id"],
@@ -83,16 +99,19 @@ def read_note(conn, note_id: str) -> dict:
         "body": row["body"],
         "tags": json.loads(row["tags"]),
         "version": row["version"],
+        "importance": row["importance"],
         "updated_at": row["updated_at"],
     }
 
 
-def update_note(conn, note_id, title, body, tags, chunks, vectors) -> None:
+def update_note(conn, note_id, title, body, tags, chunks, vectors,
+                importance: float | None = None) -> None:
     """Apply an edit. If ``chunks``/``vectors`` are not None the passages are
-    rebuilt; pass None when only tags changed so embeddings are left intact."""
+    rebuilt; pass None when only tags changed so embeddings are left intact.
+    Editing counts as use, so an archived note is revived."""
     with conn:
         row = conn.execute(
-            "SELECT seq, title, body, tags, version "
+            "SELECT seq, title, body, tags, version, importance "
             "FROM notes WHERE id = ? AND deleted_at IS NULL",
             (note_id,),
         ).fetchone()
@@ -106,10 +125,12 @@ def update_note(conn, note_id, title, body, tags, chunks, vectors) -> None:
         new_title = title if title is not None else row["title"]
         new_body = body if body is not None else row["body"]
         new_tags = json.dumps(tags, ensure_ascii=False) if tags is not None else row["tags"]
+        new_importance = importance if importance is not None else row["importance"]
         conn.execute(
-            "UPDATE notes SET title = ?, body = ?, tags = ?, version = version + 1, "
-            "updated_at = datetime('now') WHERE seq = ?",
-            (new_title, new_body, new_tags, seq),
+            "UPDATE notes SET title = ?, body = ?, tags = ?, importance = ?, "
+            "version = version + 1, updated_at = datetime('now'), archived_at = NULL "
+            "WHERE seq = ?",
+            (new_title, new_body, new_tags, new_importance, seq),
         )
         conn.execute("DELETE FROM notes_fts WHERE rowid = ?", (seq,))
         conn.execute("INSERT INTO notes_fts(rowid, title, body) VALUES(?, ?, ?)", (seq, new_title, new_body))
@@ -187,6 +208,47 @@ def touch_access(conn, ids: list[str]) -> None:
             "last_accessed_at = datetime('now') WHERE note_id = ?",
             [(i,) for i in ids],
         )
+        _revive(conn, ids)
+
+
+def add_temporal_edges(conn, note_id: str) -> list[str]:
+    """Temporal contiguity: weakly bind a fresh note to the last few notes
+    created inside the window, so notes written together recall together.
+    Returns the ids that were bound."""
+    rows = conn.execute(
+        "SELECT id FROM notes WHERE id != ? AND deleted_at IS NULL "
+        "AND created_at >= datetime('now', ?) "
+        "ORDER BY seq DESC LIMIT ?",
+        (note_id, f"-{config.TEMPORAL_WINDOW_MINUTES} minutes", config.TEMPORAL_TOPK),
+    ).fetchall()
+    if not rows:
+        return []
+    pairs = [(note_id, row["id"]) for row in rows] + [(row["id"], note_id) for row in rows]
+    with conn:
+        conn.executemany(
+            "INSERT INTO synapses(src, dst, kind, weight) VALUES(?, ?, 'temporal', ?) "
+            "ON CONFLICT(src, dst, kind) DO NOTHING",
+            [(src, dst, config.TEMPORAL_WEIGHT) for src, dst in pairs],
+        )
+    return [row["id"] for row in rows]
+
+
+def add_semantic_edges(conn, note_id: str, related: list[dict]) -> None:
+    """Provisional semantic edges at encoding time, so a new note joins the
+    associative graph immediately instead of waiting for the next
+    consolidation (whose exact top-k rebuild supersedes these)."""
+    strong = [r for r in related if r["similarity"] >= config.SEM_FLOOR and r["id"] != note_id]
+    if not strong:
+        return
+    with conn:
+        for r in strong:
+            for src, dst in ((note_id, r["id"]), (r["id"], note_id)):
+                conn.execute(
+                    "INSERT INTO synapses(src, dst, kind, weight) VALUES(?, ?, 'semantic', ?) "
+                    "ON CONFLICT(src, dst, kind) DO UPDATE SET "
+                    "weight = max(weight, excluded.weight)",
+                    (src, dst, r["similarity"]),
+                )
 
 
 def replace_chunks(conn, note_id: str, chunks: list[str], vectors: list[list[float]]) -> None:
@@ -221,3 +283,27 @@ def list_duplicates(conn, limit: int = 50) -> list[dict]:
          "score": round(r["score"], 4)}
         for r in rows
     ]
+
+
+def list_clusters(conn, limit: int = 20) -> list[dict]:
+    rows = conn.execute(
+        "SELECT key, members, score FROM cluster_candidates ORDER BY score DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        member_ids = json.loads(row["members"])
+        placeholders = ",".join("?" for _ in member_ids)
+        notes = conn.execute(
+            f"SELECT id, title FROM notes WHERE id IN ({placeholders}) AND deleted_at IS NULL",
+            member_ids,
+        ).fetchall()
+        # members trashed since the flag can shrink a group below usefulness
+        if len(notes) < config.CLUSTER_MIN_SIZE:
+            continue
+        out.append({
+            "key": row["key"],
+            "score": round(row["score"], 4),
+            "notes": [{"id": n["id"], "title": n["title"]} for n in notes],
+        })
+    return out

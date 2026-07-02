@@ -33,6 +33,13 @@ def test_token_matches_never_raises_and_compares_correctly():
     assert server._token_matches("Bearer tokeň", expected) is False
 
 
+def test_centroid_is_normalized_mean():
+    vec = server._centroid([[1.0, 0.0], [0.0, 1.0]])
+    norm = sum(x * x for x in vec) ** 0.5
+    assert abs(norm - 1.0) < 1e-9
+    assert abs(vec[0] - vec[1]) < 1e-9
+
+
 def test_assemble_truncates_oversized_first_note():
     huge = retrieve.Candidate(
         id="11111111-2222-3333-4444-555555555555", title="Huge", body="word " * 40_000
