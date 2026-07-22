@@ -34,6 +34,12 @@ ReadWritePaths=/var/lib/vault-mcp
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# db.py sets PRAGMA cipher_memory_security=ON, which mlock()s sensitive SQLCipher
+# memory so keys/plaintext can't be swapped to disk. The default RLIMIT_MEMLOCK
+# is too small, so the lock fails (mlock() errno=12 ENOMEM) and the hardening
+# silently no-ops. Raise it so the (small) secure heap can actually be locked;
+# real locked memory stays bounded by what SQLCipher allocates.
+LimitMEMLOCK=infinity
 
 [Install]
 WantedBy=multi-user.target

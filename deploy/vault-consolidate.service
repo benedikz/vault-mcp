@@ -22,3 +22,6 @@ ProtectHome=true
 ReadWritePaths=/var/lib/vault-mcp
 ProtectKernelTunables=true
 ProtectControlGroups=true
+# Same as the main unit: cipher_memory_security=ON mlock()s the SQLCipher secure
+# heap; without this the lock fails (errno=12 ENOMEM) during the nightly pass.
+LimitMEMLOCK=infinity
