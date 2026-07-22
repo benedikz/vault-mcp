@@ -1,10 +1,14 @@
 import json
+import re
 import uuid
 
 import sqlite_vec
 
 from vault import config
 from vault.errors import NotFoundError, ValidationError
+
+# Leading YAML frontmatter block: --- ... --- at the very start of a body.
+_FRONTMATTER_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---", re.DOTALL)
 
 
 def _audit(conn, action: str, note_id: str | None = None, detail: str | None = None) -> None:
@@ -306,4 +310,77 @@ def list_clusters(conn, limit: int = 20) -> list[dict]:
             "score": round(row["score"], 4),
             "notes": [{"id": n["id"], "title": n["title"]} for n in notes],
         })
+    return out
+
+
+# Frontmatter scalars surfaced by list_notes(include_meta=True). A deliberate
+# whitelist — never the body, only these few catalog fields (kb.* live nested
+# under a `kb:` key but a flat search over the frontmatter block finds them).
+_META_FIELDS = ("type", "area", "confidence", "kind", "verified")
+
+
+def _frontmatter_scalars(body: str) -> dict:
+    """Extract a whitelist of scalar fields from a note's leading YAML
+    frontmatter without a YAML dependency. Returns {} when there is no
+    frontmatter. Never returns the body itself."""
+    match = _FRONTMATTER_RE.match(body or "")
+    if not match:
+        return {}
+    block = match.group(1)
+    out: dict = {}
+    for field in _META_FIELDS:
+        found = re.search(rf"(?m)^\s*{field}:\s*(.+?)\s*$", block)
+        if found:
+            out[field] = found.group(1).strip().strip("\"'")
+    if "confidence" in out:
+        try:
+            out["confidence"] = float(out["confidence"])
+        except ValueError:
+            pass
+    return out
+
+
+def list_notes(conn, limit: int | None = None, offset: int = 0,
+               include_meta: bool = False) -> list[dict]:
+    """Complete metadata catalog of every live (non-trashed) note, oldest-first.
+    Never returns the body. Archived notes are included, flagged. With
+    include_meta, a whitelist of frontmatter scalars is parsed server-side and
+    returned under "meta" — still no body."""
+    cols = ("n.id, n.title, n.tags, n.importance, n.version, "
+            "n.created_at, n.updated_at, n.archived_at, "
+            "COALESCE(s.salience, 0) AS salience")
+    if include_meta:
+        cols += ", n.body AS body"
+    sql = (f"SELECT {cols} FROM notes n "
+           "LEFT JOIN node_stats s ON s.note_id = n.id "
+           "WHERE n.deleted_at IS NULL ORDER BY n.seq")
+    params: list = []
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params = [limit, offset]
+    rows = conn.execute(sql, params).fetchall()
+    # degree = number of distinct neighbours (synapses are stored per direction)
+    degree = {
+        row["src"]: row["c"]
+        for row in conn.execute(
+            "SELECT src, COUNT(DISTINCT dst) AS c FROM synapses GROUP BY src"
+        ).fetchall()
+    }
+    out: list[dict] = []
+    for row in rows:
+        item = {
+            "id": row["id"],
+            "title": row["title"],
+            "tags": json.loads(row["tags"]),
+            "importance": row["importance"],
+            "version": row["version"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "archived": row["archived_at"] is not None,
+            "salience": round(row["salience"], 4),
+            "degree": degree.get(row["id"], 0),
+        }
+        if include_meta:
+            item["meta"] = _frontmatter_scalars(row["body"])
+        out.append(item)
     return out

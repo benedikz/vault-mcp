@@ -179,6 +179,22 @@ def build_mcp(cfg, conn, embedder):
             return retrieve.neighbors(conn, nid)
 
     @mcp.tool()
+    def list_notes(limit: int | None = None, offset: int = 0,
+                   include_meta: bool = False) -> list[dict]:
+        """Complete catalog of EVERY note's metadata — the only exhaustive
+        enumeration exposed over MCP (search caps at k, neighbors is graph-local).
+        Returns per note, oldest-first: id, title, tags, importance, version,
+        created_at, updated_at, archived, salience, degree. NEVER the body — so
+        it is safe to enumerate the whole vault without exposing its contents.
+        Pass limit/offset to page. Set include_meta=True to also parse each
+        note's frontmatter and return whitelisted scalars (type, area,
+        confidence, kind, verified) under "meta" — still no body."""
+        capped = validate.bounded_int(limit, 1, config.MAX_LIST, "limit") if limit is not None else None
+        off = validate.bounded_int(offset, 0, config.MAX_LIST, "offset")
+        with db.lock:
+            return store.list_notes(conn, capped, off, bool(include_meta))
+
+    @mcp.tool()
     def connect(src: str, dst: str, kind: str = "link", weight: float = 1.0) -> dict:
         """Create or update an explicit synapse between two notes."""
         clean_src = validate.note_id(src, "src")

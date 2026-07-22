@@ -86,6 +86,9 @@ MAX_DEPTH = 4
 MAX_BUDGET_TOKENS = 16_000
 MAX_FETCH = 400
 CANDIDATE_CAP = 50
+# Upper bound for the list_notes enumeration window (limit/offset). Generous —
+# the point of list_notes is a complete catalog, not a ranked top-k.
+MAX_LIST = 100_000
 
 _KEY_RE = re.compile(r"\A[0-9a-fA-F]{64}\Z")
 _TRUE = {"1", "true", "yes", "on"}

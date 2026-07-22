@@ -125,6 +125,7 @@ claude mcp add --transport http brain https://vault.example.com/mcp \
 |------|---------|
 | `create_note` / `update_note` / `trash_note` / `read_note` | CRUD; updates keep version history; trash is reversible. `create_note` accepts `importance` (0..1) and returns the nearest existing notes (with `near_duplicate` flags) so the agent can link, merge, or reconcile contradictions at write time |
 | `search` | fast hybrid search (vectors + BM25); archived hits carry `archived: true` |
+| `list_notes` | complete metadata catalog of every note (id, title, tags, importance, version, timestamps, archived, salience, degree) — the only exhaustive enumeration (`search` caps at `k`, `neighbors` is graph-local). Never returns the body; `include_meta=true` adds whitelisted frontmatter scalars (type, area, confidence, kind, verified) |
 | `recall` | associative recall: hybrid seed → spreading activation → rerank → cited context; recalled notes get stronger and archived ones revive |
 | `neighbors` / `connect` / `reinforce` | inspect and shape the synapse graph |
 | `review_duplicates` | list near-duplicate note pairs flagged by consolidation (you decide whether to merge) |

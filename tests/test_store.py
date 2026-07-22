@@ -191,3 +191,64 @@ def test_update_note_revives_archived(conn, make_note):
     store.update_note(conn, nid, None, None, ["seen"], None, None)
     row = conn.execute("SELECT archived_at FROM notes WHERE id = ?", (nid,)).fetchone()
     assert row["archived_at"] is None
+
+
+_LIST_FIELDS = {"id", "title", "tags", "importance", "version",
+                "created_at", "updated_at", "archived", "salience", "degree"}
+
+
+def test_list_notes_returns_metadata_never_body(conn, make_note):
+    a = make_note("Alpha", "the body of alpha", tags=["x"])
+    b = make_note("Beta", "the body of beta")
+    store.connect_notes(conn, a, b, "link", 1.0)
+    rows = store.list_notes(conn)
+    assert {r["id"] for r in rows} == {a, b}
+    for r in rows:
+        assert "body" not in r
+        assert _LIST_FIELDS.issubset(r)
+    by_id = {r["id"]: r for r in rows}
+    assert by_id[a]["degree"] == 1        # a -> b
+    assert by_id[b]["degree"] == 0
+    assert by_id[a]["tags"] == ["x"]
+    assert by_id[a]["archived"] is False
+
+
+def test_list_notes_excludes_trashed_and_flags_archived(conn, make_note):
+    a = make_note("Keep", "stays live")
+    b = make_note("Trash", "gets trashed")
+    store.trash_note(conn, b)
+    conn.execute("UPDATE notes SET archived_at = datetime('now') WHERE id = ?", (a,))
+    conn.commit()
+    rows = store.list_notes(conn)
+    assert [r["id"] for r in rows] == [a]
+    assert rows[0]["archived"] is True
+
+
+def test_list_notes_paginates_oldest_first(conn, make_note):
+    ids = [make_note(f"N{i}", f"body {i}") for i in range(5)]
+    page = store.list_notes(conn, limit=2, offset=1)
+    assert [r["id"] for r in page] == ids[1:3]
+
+
+def test_list_notes_include_meta_parses_frontmatter_without_body(conn, make_note):
+    body = ("---\n"
+            "type: reference\n"
+            "area: meta\n"
+            "kb:\n"
+            "  confidence: 0.9\n"
+            "  kind: reference\n"
+            "  verified: 2026-07-22\n"
+            "---\n\n"
+            "The actual note content that must never be returned.")
+    nid = make_note("Fm", body)
+    rows = store.list_notes(conn, include_meta=True)
+    meta = rows[0]["meta"]
+    assert meta["confidence"] == 0.9
+    assert meta["kind"] == "reference"
+    assert meta["type"] == "reference"
+    assert meta["verified"] == "2026-07-22"
+    assert "body" not in rows[0]
+    # a note without frontmatter yields an empty meta, not an error
+    plain = make_note("Plain", "no frontmatter here")
+    rows = store.list_notes(conn, include_meta=True)
+    assert next(r for r in rows if r["id"] == plain)["meta"] == {}
