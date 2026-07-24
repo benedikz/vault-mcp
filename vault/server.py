@@ -1,7 +1,7 @@
 import hmac
 
 from vault import chunk, config, consolidate, db, embed, retrieve, store, validate
-from vault.errors import ConfigError
+from vault.errors import ConfigError, EmbeddingError
 
 
 def _assemble(candidates: list[retrieve.Candidate], max_tokens: int):
@@ -13,7 +13,10 @@ def _assemble(candidates: list[retrieve.Candidate], max_tokens: int):
         header = f"### {cand.title}  (id:{cand.id})\n"
         block = f"{header}{cand.body}\n\n"
         if used and length + len(block) > budget:
-            break
+            # This note would overflow the remaining budget — skip it and keep
+            # trying lower-ranked notes that still fit, rather than stopping
+            # dead. A single large note must not monopolize the whole context.
+            continue
         if not used and len(block) > budget:
             # Always return the top hit, but never blow the caller's budget:
             # truncate the body; the id citation lets the agent read the rest.
@@ -149,7 +152,7 @@ def build_mcp(cfg, conn, embedder):
 
     @mcp.tool()
     def recall(query: str, depth: int = 2, max_tokens: int = 4000) -> dict:
-        """Associative recall: hybrid seed, graph spreading-activation, optional rerank, assembled cited context."""
+        """Associative recall: hybrid seed, graph spreading-activation, cross-encoder rerank (on by default), assembled cited context."""
         clean_query = validate.text(query, config.MAX_QUERY, "query")
         clean_depth = validate.bounded_int(depth, 0, config.MAX_DEPTH, "depth")
         budget = validate.bounded_int(max_tokens, 256, config.MAX_BUDGET_TOKENS, "max_tokens")
@@ -157,7 +160,12 @@ def build_mcp(cfg, conn, embedder):
         with db.lock:
             candidates = retrieve.recall(conn, vector, clean_query, clean_depth, config.SEED_K)
         snippets = [c.body[: config.RERANK_SNIPPET_CHARS] for c in candidates]
-        scores = embedder.rerank(clean_query, snippets) if candidates else None
+        try:
+            scores = embedder.rerank(clean_query, snippets) if candidates else None
+        except EmbeddingError:
+            # Reranking is best-effort: if the cross-encoder can't load, fall
+            # back to the pre-rerank order instead of failing the whole recall.
+            scores = None
         if scores is not None:
             candidates = [candidates[i] for i in sorted(range(len(candidates)), key=lambda i: scores[i], reverse=True)]
         context, used = _assemble(candidates, budget)

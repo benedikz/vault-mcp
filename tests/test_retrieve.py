@@ -1,4 +1,22 @@
-from vault import retrieve
+from vault import config, retrieve
+
+
+def test_dense_knn_applies_similarity_floor(conn, embedder, make_note):
+    make_note("Espresso", "espresso machines and grinders")
+    vec = embedder.embed_query("espresso machines")
+    # an impossibly high floor rejects even a strong match ...
+    assert retrieve.dense_knn(conn, vec, 5, sim_floor=0.999) == []
+    # ... while no floor keeps it
+    assert retrieve.dense_knn(conn, vec, 5, sim_floor=0.0)
+
+
+def test_search_returns_empty_when_nothing_clears_floor(conn, embedder, make_note, monkeypatch):
+    make_note("Espresso", "espresso machines and grinders")
+    monkeypatch.setattr(config, "RETRIEVE_SIM_FLOOR", 0.999)
+    # dense side: every hit is below the (absurd) floor; keyword side: the term
+    # exists in no note — so a no-match query yields nothing, not noise.
+    vec = embedder.embed_query("espresso")
+    assert retrieve.search(conn, vec, "nonexistent-zarquon-term", 5) == []
 
 
 def test_search_finds_relevant_note(conn, embedder, make_note):

@@ -11,6 +11,17 @@ RRF_K = 60
 SEED_K = 24
 SEM_TOPK = 8
 SEM_FLOOR = 0.55
+
+# Retrieval relevance floor: a dense (cosine) hit whose similarity falls below
+# this is treated as noise and dropped from the seed set, so a query with no
+# real match returns nothing instead of the least-unrelated note. Keyword
+# (BM25) matches are exact and bypass this floor; spreading-activation hops are
+# not subject to it either — an associatively-linked note need not match the
+# query text. Conservative by default (avoids false negatives); raise toward
+# ~0.30–0.35 once you have confirmed real matches on your own model/corpus stay
+# above it.
+RETRIEVE_SIM_FLOOR = 0.2
+
 SPREAD_DECAY = 0.6
 SPREAD_FRONTIER_CAP = 256
 HEBB_DELTA = 0.1
@@ -92,6 +103,7 @@ MAX_LIST = 100_000
 
 _KEY_RE = re.compile(r"\A[0-9a-fA-F]{64}\Z")
 _TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off"}
 
 
 @dataclass(frozen=True)
@@ -143,6 +155,15 @@ def _read_int(name: str, default: int) -> int:
         raise ConfigError(f"{name} must be an integer") from exc
 
 
+def _read_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name, "").strip().lower()
+    if value in _TRUE:
+        return True
+    if value in _FALSE:
+        return False
+    return default
+
+
 def default_prefixes(model: str) -> tuple[str, str]:
     """e5 models are trained to expect 'query:'/'passage:' prefixes; others get none.
 
@@ -184,7 +205,7 @@ def load() -> Config:
         port=_read_int("VAULT_PORT", 8765),
         model=model,
         reranker=os.environ.get("VAULT_RERANKER", "Xenova/ms-marco-MiniLM-L-6-v2").strip(),
-        rerank=os.environ.get("VAULT_RERANK", "").strip().lower() in _TRUE,
+        rerank=_read_bool("VAULT_RERANK", True),
         query_prefix=_read_prefix("VAULT_QUERY_PREFIX", qp_default),
         passage_prefix=_read_prefix("VAULT_PASSAGE_PREFIX", pp_default),
         public_host=os.environ.get("VAULT_PUBLIC_HOST", "").strip(),

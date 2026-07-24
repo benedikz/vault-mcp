@@ -21,8 +21,15 @@ def _fts_query(query: str) -> str:
     return " OR ".join('"' + tok.replace('"', '""') + '"' for tok in tokens)
 
 
-def dense_knn(conn, query_vector, k: int) -> list[str]:
-    """Nearest passages, collapsed to their parent notes (best passage wins)."""
+def dense_knn(conn, query_vector, k: int, sim_floor: float | None = None) -> list[str]:
+    """Nearest passages, collapsed to their parent notes (best passage wins).
+
+    Passages whose cosine similarity (1 - distance) falls below ``sim_floor``
+    are dropped, so a query with no genuinely near note yields no dense seed
+    (defaults to ``config.RETRIEVE_SIM_FLOOR`` when not given)."""
+    if sim_floor is None:
+        sim_floor = config.RETRIEVE_SIM_FLOOR
+    max_distance = 1.0 - sim_floor
     blob = sqlite_vec.serialize_float32(query_vector)
     fetch = min(k * 8, config.MAX_FETCH)
     rows = conn.execute(
@@ -37,6 +44,8 @@ def dense_knn(conn, query_vector, k: int) -> list[str]:
     ordered: list[str] = []
     seen: set[str] = set()
     for row in rows:
+        if row["distance"] > max_distance:
+            continue
         if row["id"] in seen:
             continue
         seen.add(row["id"])

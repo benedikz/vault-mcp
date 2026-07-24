@@ -10,9 +10,10 @@ Designed to run on a Raspberry Pi behind a Cloudflare Tunnel.
   in memory only. This matches the "protect against file/dump theft" threat model.
 - **Retrieval-optimized.** Hybrid search fuses dense vectors (sqlite-vec) with keyword
   BM25 (FTS5) via Reciprocal Rank Fusion, then expands over a weighted synapse graph
-  (spreading activation), with optional cross-encoder reranking. Long notes are split
-  into overlapping passages and embedded per-passage, so dense retrieval sees the whole
-  note instead of the first ~512 tokens. Ranking also blends in a recency factor.
+  (spreading activation), then re-sorts by a cross-encoder reranker (on by default). Long
+  notes are split into overlapping passages and embedded per-passage, so dense retrieval
+  sees the whole note instead of the first ~512 tokens. Ranking also blends in a recency
+  factor, and a dense-similarity floor keeps a no-match query from returning noise.
 - **Brain-like metadata.** Notes are neurons; synapses are typed weighted edges
   (`link`, `semantic`, `hebbian`, `temporal`). Co-recalled notes reinforce each other
   (Hebbian learning); recalling a note strengthens the note itself, so what you use
@@ -231,7 +232,11 @@ stack but no model download.
 - DB retrieval (sqlite-vec + FTS5) is sub-millisecond to low-ms at personal scale.
 - Query latency is dominated by embedding the query on the CPU — tens to low-hundreds of
   ms with a small model. Larger models (e.g. `multilingual-e5-large`) are slower.
-- Reranking is off by default; enable with `VAULT_RERANK=1` (8GB handles it, adds latency).
+- Reranking is **on by default** — the cross-encoder re-sorts `recall` candidates by true
+  query relevance, which markedly improves precision (without it, spreading activation lets
+  well-connected hub notes bury the note you actually asked for). It adds CPU latency and
+  downloads the reranker model on first use; disable with `VAULT_RERANK=0` if that trade is
+  not worth it on a given box. `search` never reranks (it stays the fast path).
 - The semantic-edge rebuild in consolidation is O(n^2) in memory blocks — fine to tens of
   thousands of notes. Beyond that, move to pgvector/Qdrant.
 
